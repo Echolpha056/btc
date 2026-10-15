@@ -31,32 +31,49 @@ def send_wechat(title: str, content: str):
         print(f"微信发送异常: {e}")
 
 def get_binance_orderbook():
-    url = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit={ORDERBOOK_DEPTH}"
-    data = requests.get(url, timeout=5).json()
-    bids = sum(float(p) * float(q) for p, q in data["bids"])
-    asks = sum(float(p) * float(q) for p, q in data["asks"])
-    return bids, asks
+    try:
+        url = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit={ORDERBOOK_DEPTH}"
+        data = requests.get(url, timeout=5).json()
+        if "bids" not in data or "asks" not in data:
+            print(f"币安订单簿异常: {data}")
+            return 0, 0
+        bids = sum(float(p) * float(q) for p, q in data["bids"])
+        asks = sum(float(p) * float(q) for p, q in data["asks"])
+        return bids, asks
+    except Exception as e:
+        print(f"币安订单簿获取失败: {e}")
+        return 0, 0
 
 def get_okx_orderbook():
-    url = f"https://www.okx.com/api/v5/market/books?instId={SYMBOL}&sz={ORDERBOOK_DEPTH}"
-    data = requests.get(url, timeout=5).json()
-    if data.get("code") != "0":
+    try:
+        url = f"https://www.okx.com/api/v5/market/books?instId={SYMBOL}&sz={ORDERBOOK_DEPTH}"
+        data = requests.get(url, timeout=5).json()
+        if data.get("code") != "0" or not data.get("data"):
+            return 0, 0
+        bids = sum(float(p) * float(q) for p, q, _, _ in data["data"][0]["bids"])
+        asks = sum(float(p) * float(q) for p, q, _, _ in data["data"][0]["asks"])
+        return bids, asks
+    except Exception as e:
+        print(f"欧意订单簿获取失败: {e}")
         return 0, 0
-    bids = sum(float(p) * float(q) for p, q, _, _ in data["data"][0]["bids"])
-    asks = sum(float(p) * float(q) for p, q, _, _ in data["data"][0]["asks"])
-    return bids, asks
 
 def get_binance_klines(interval="15m", limit=50):
-    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={interval}&limit={limit}"
-    data = requests.get(url, timeout=5).json()
-    df = pd.DataFrame(data, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_volume", "trades", "taker_buy_base",
-        "taker_buy_quote", "ignore"
-    ])
-    df["close"] = df["close"].astype(float)
-    df["volume"] = df["volume"].astype(float)
-    return df
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={interval}&limit={limit}"
+        data = requests.get(url, timeout=5).json()
+        if not isinstance(data, list) or len(data) == 0:
+            raise ValueError("K线数据异常")
+        df = pd.DataFrame(data, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "trades", "taker_buy_base",
+            "taker_buy_quote", "ignore"
+        ])
+        df["close"] = df["close"].astype(float)
+        df["volume"] = df["volume"].astype(float)
+        return df
+    except Exception as e:
+        print(f"K线获取失败: {e}")
+        return None
 
 def calculate_bollinger(df, period=20, std=2):
     df = df.copy()
@@ -68,6 +85,8 @@ def calculate_bollinger(df, period=20, std=2):
 
 def get_bb_info(interval):
     df = get_binance_klines(interval)
+    if df is None or len(df) < BB_PERIOD:
+        return None
     df = calculate_bollinger(df)
     latest = df.iloc[-1]
     price = latest["close"]
@@ -77,7 +96,7 @@ def get_bb_info(interval):
     return {"price": price, "lower": lower, "mid": mid, "dist": dist}
 
 print("=" * 50)
-print("事件合约信号监控已启动")
+print("事件合约信号监控已启动（已加强容错）")
 print("=" * 50)
 
 last_signal_time = 0
@@ -93,10 +112,20 @@ while True:
         bb_15 = get_bb_info("15m")
         bb_5  = get_bb_info("5m")
         bb_3  = get_bb_info("3m")
-        price = bb_15["price"]
 
+        if bb_15 is None:
+            print("布林带数据获取失败，跳过本轮")
+            time.sleep(CHECK_INTERVAL)
+            continue
+
+        price = bb_15["price"]
         near_15 = bb_15["dist"] < NEAR_LOWER_15M and price < bb_15["mid"]
-        near_short = (bb_5["dist"] < NEAR_LOWER_5M) or (bb_3["dist"] < NEAR_LOWER_3M)
+        near_short = False
+        if bb_5:
+            near_short = near_short or (bb_5["dist"] < NEAR_LOWER_5M)
+        if bb_3:
+            near_short = near_short or (bb_3["dist"] < NEAR_LOWER_3M)
+
         signal = orderbook_ok and near_15 and near_short
 
         now = datetime.now().strftime("%H:%M:%S")
@@ -112,8 +141,8 @@ while True:
 
 **距离下轨**：
 - 15分钟：{bb_15['dist']:.2f}%
-- 5分钟：{bb_5['dist']:.2f}%
-- 3分钟：{bb_3['dist']:.2f}%
+- 5分钟：{bb_5['dist']:.2f}% if bb_5 else 'N/A'
+- 3分钟：{bb_3['dist']:.2f}% if bb_3 else 'N/A'
 
 **订单簿**：
 - 币安买/卖比：{bn_ratio:.2f}
@@ -130,7 +159,7 @@ while True:
             print("暂无信号")
 
     except Exception as e:
-        print(f"错误: {e}")
+        print(f"主循环错误: {e}")
         time.sleep(10)
 
     time.sleep(CHECK_INTERVAL)
