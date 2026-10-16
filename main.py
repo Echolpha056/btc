@@ -20,7 +20,7 @@ NEAR_UPPER_15M = 0.35
 NEAR_UPPER_5M = 0.25
 NEAR_UPPER_3M = 0.20
 
-SIGNAL_COOLDOWN = 300
+SIGNAL_COOLDOWN = 300          # 5分钟冷却
 
 # ==================== 成功率统计 ====================
 pending_signals = deque()
@@ -114,7 +114,6 @@ def check_pending_signals():
         elapsed = (now - sig["time"]).total_seconds()
         direction_text = "做多" if sig["direction"] == "long" else "做空"
 
-        # 3分钟验证 + 推送
         if not sig["checked_3m"] and elapsed >= 180:
             win = (current_price > sig["price"]) if sig["direction"] == "long" else (current_price < sig["price"])
             stats_3m["total"] += 1
@@ -137,7 +136,6 @@ def check_pending_signals():
             send_wechat(title, content)
             print(f">>> 3分钟验证: {result} | 成功率: {rate_3m:.1f}%")
 
-        # 5分钟验证 + 推送
         if not sig["checked_5m"] and elapsed >= 300:
             win = (current_price > sig["price"]) if sig["direction"] == "long" else (current_price < sig["price"])
             stats_5m["total"] += 1
@@ -172,7 +170,7 @@ def get_success_rate_text():
     return f"3分钟成功率: {rate_3m:.1f}% ({stats_3m['win']}/{stats_3m['total']})\n5分钟成功率: {rate_5m:.1f}% ({stats_5m['win']}/{stats_5m['total']})"
 
 print("=" * 50)
-print("BTC 事件合约信号监控已启动（验证结果会推送微信）")
+print("BTC 事件合约信号监控已启动（防重复版）")
 print("=" * 50)
 
 last_long_time = 0
@@ -196,8 +194,10 @@ while True:
             continue
 
         price = bb_15["price"]
-        now = datetime.now().strftime("%H:%M:%S")
+        now_str = datetime.now().strftime("%H:%M:%S")
+        now_ts = time.time()
 
+        # 做多判断
         near_lower_15 = bb_15["dist_lower"] < NEAR_LOWER_15M and price < bb_15["mid"]
         near_lower_short = False
         if bb_5:
@@ -206,6 +206,7 @@ while True:
             near_lower_short = near_lower_short or (bb_3["dist_lower"] < NEAR_LOWER_3M)
         long_signal = (buy_sell_ratio >= MIN_BUY_SELL_RATIO) and near_lower_15 and near_lower_short
 
+        # 做空判断
         near_upper_15 = bb_15["dist_upper"] < NEAR_UPPER_15M and price > bb_15["mid"]
         near_upper_short = False
         if bb_5:
@@ -215,28 +216,31 @@ while True:
         short_signal = (sell_buy_ratio >= MIN_SELL_BUY_RATIO) and near_upper_15 and near_upper_short
 
         rate_text = get_success_rate_text()
-        print(f"[{now}] BTC价格:{price:.1f} | 下轨:{bb_15['dist_lower']:.2f}% | 上轨:{bb_15['dist_upper']:.2f}% | 买/卖:{buy_sell_ratio:.2f}")
+        print(f"[{now_str}] BTC价格:{price:.1f} | 下轨:{bb_15['dist_lower']:.2f}% | 上轨:{bb_15['dist_upper']:.2f}% | 买/卖:{buy_sell_ratio:.2f}")
         print(f"       {rate_text}")
 
-        if long_signal:
-            current_time = time.time()
-            if current_time - last_long_time > SIGNAL_COOLDOWN:
-                pending_signals.append({
-                    "time": datetime.now(),
-                    "price": price,
-                    "direction": "long",
-                    "checked_3m": False,
-                    "checked_5m": False
-                })
-                title = "【BTC做多信号】事件合约看涨"
-                content = f"""
-**时间**：{now}
+        # 做多信号（加强冷却）
+        if long_signal and (now_ts - last_long_time > SIGNAL_COOLDOWN):
+            pending_signals.append({
+                "time": datetime.now(),
+                "price": price,
+                "direction": "long",
+                "checked_3m": False,
+                "checked_5m": False
+            })
+            
+            dist5 = f"{bb_5['dist_lower']:.2f}%" if bb_5 else "N/A"
+            dist3 = f"{bb_3['dist_lower']:.2f}%" if bb_3 else "N/A"
+            
+            title = "【BTC做多信号】事件合约看涨"
+            content = f"""
+**时间**：{now_str}
 **BTC当前价格**：{price:.1f}
 
 **距离下轨**：
 - 15分钟：{bb_15['dist_lower']:.2f}%
-- 5分钟：{bb_5['dist_lower']:.2f}% if bb_5 else 'N/A'
-- 3分钟：{bb_3['dist_lower']:.2f}% if bb_3 else 'N/A'
+- 5分钟：{dist5}
+- 3分钟：{dist3}
 
 **欧意买/卖比**：{buy_sell_ratio:.2f}
 
@@ -245,29 +249,32 @@ while True:
 
 建议：最小仓位开【看涨】3分钟或5分钟事件合约
 """
-                send_wechat(title, content)
-                print(">>> BTC做多信号已推送微信！")
-                last_long_time = current_time
+            send_wechat(title, content)
+            print(">>> BTC做多信号已推送微信！")
+            last_long_time = now_ts
 
-        if short_signal:
-            current_time = time.time()
-            if current_time - last_short_time > SIGNAL_COOLDOWN:
-                pending_signals.append({
-                    "time": datetime.now(),
-                    "price": price,
-                    "direction": "short",
-                    "checked_3m": False,
-                    "checked_5m": False
-                })
-                title = "【BTC做空信号】事件合约看跌"
-                content = f"""
-**时间**：{now}
+        # 做空信号（加强冷却）
+        if short_signal and (now_ts - last_short_time > SIGNAL_COOLDOWN):
+            pending_signals.append({
+                "time": datetime.now(),
+                "price": price,
+                "direction": "short",
+                "checked_3m": False,
+                "checked_5m": False
+            })
+            
+            dist5 = f"{bb_5['dist_upper']:.2f}%" if bb_5 else "N/A"
+            dist3 = f"{bb_3['dist_upper']:.2f}%" if bb_3 else "N/A"
+            
+            title = "【BTC做空信号】事件合约看跌"
+            content = f"""
+**时间**：{now_str}
 **BTC当前价格**：{price:.1f}
 
 **距离上轨**：
 - 15分钟：{bb_15['dist_upper']:.2f}%
-- 5分钟：{bb_5['dist_upper']:.2f}% if bb_5 else 'N/A'
-- 3分钟：{bb_3['dist_upper']:.2f}% if bb_3 else 'N/A'
+- 5分钟：{dist5}
+- 3分钟：{dist3}
 
 **欧意卖/买比**：{sell_buy_ratio:.2f}
 
@@ -276,9 +283,9 @@ while True:
 
 建议：最小仓位开【看跌】3分钟或5分钟事件合约
 """
-                send_wechat(title, content)
-                print(">>> BTC做空信号已推送微信！")
-                last_short_time = current_time
+            send_wechat(title, content)
+            print(">>> BTC做空信号已推送微信！")
+            last_short_time = now_ts
 
         if not long_signal and not short_signal:
             print("暂无信号")
