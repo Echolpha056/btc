@@ -4,28 +4,34 @@ import pandas as pd
 from datetime import datetime
 from collections import deque
 
-# ==================== 配置区（最严格版） ====================
+# ==================== 配置区（最严格 + 防重复） ====================
 SERVERCHAN_SENDKEY = "SCT440554TBR9un4ZZPUOu6r28LJvNDpY8"
 
 SYMBOL = "BTC-USDT"
 CHECK_INTERVAL = 20
-MIN_BUY_SELL_RATIO = 4.0          # 更严格
-MIN_SELL_BUY_RATIO = 4.0
+MIN_BUY_SELL_RATIO = 5.0
+MIN_SELL_BUY_RATIO = 5.0
 
-NEAR_LOWER_15M = 0.12
-NEAR_LOWER_5M  = 0.10
-NEAR_LOWER_3M  = 0.08
+NEAR_LOWER_15M = 0.08
+NEAR_LOWER_5M  = 0.06
+NEAR_LOWER_3M  = 0.05
 
-NEAR_UPPER_15M = 0.12
-NEAR_UPPER_5M  = 0.10
-NEAR_UPPER_3M  = 0.08
+NEAR_UPPER_15M = 0.08
+NEAR_UPPER_5M  = 0.06
+NEAR_UPPER_3M  = 0.05
 
-SIGNAL_COOLDOWN = 300
+SIGNAL_COOLDOWN = 600          # 10分钟冷却
+PRICE_DIFF_LIMIT = 0.15        # 价格差距小于0.15%视为重复信号
 
 # ==================== 成功率统计 ====================
 pending_signals = deque()
 stats_3m = {"win": 0, "total": 0}
 stats_5m = {"win": 0, "total": 0}
+
+last_long_price = 0
+last_short_price = 0
+last_long_time = 0
+last_short_time = 0
 
 def send_wechat(title: str, content: str):
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
@@ -168,11 +174,8 @@ def get_success_rate_text():
     return f"3分钟成功率: {rate_3m:.1f}% ({stats_3m['win']}/{stats_3m['total']})\n5分钟成功率: {rate_5m:.1f}% ({stats_5m['win']}/{stats_5m['total']})"
 
 print("=" * 50)
-print("BTC 事件合约信号监控已启动（最严格版）")
+print("BTC 事件合约信号监控已启动（最严格+防重复）")
 print("=" * 50)
-
-last_long_time = 0
-last_short_time = 0
 
 while True:
     try:
@@ -195,13 +198,13 @@ while True:
         now_str = datetime.now().strftime("%H:%M:%S")
         now_ts = time.time()
 
-        # 做多：15m + 5m + 3m 都必须接近下轨
+        # 做多条件
         near_lower_15 = bb_15["dist_lower"] < NEAR_LOWER_15M and price < bb_15["mid"]
         near_lower_5  = bb_5["dist_lower"] < NEAR_LOWER_5M
         near_lower_3  = bb_3["dist_lower"] < NEAR_LOWER_3M
         long_signal = (buy_sell_ratio >= MIN_BUY_SELL_RATIO) and near_lower_15 and near_lower_5 and near_lower_3
 
-        # 做空：15m + 5m + 3m 都必须接近上轨
+        # 做空条件
         near_upper_15 = bb_15["dist_upper"] < NEAR_UPPER_15M and price > bb_15["mid"]
         near_upper_5  = bb_5["dist_upper"] < NEAR_UPPER_5M
         near_upper_3  = bb_3["dist_upper"] < NEAR_UPPER_3M
@@ -211,16 +214,19 @@ while True:
         print(f"[{now_str}] BTC价格:{price:.1f} | 下轨:{bb_15['dist_lower']:.2f}% | 上轨:{bb_15['dist_upper']:.2f}% | 买/卖:{buy_sell_ratio:.2f}")
         print(f"       {rate_text}")
 
-        if long_signal and (now_ts - last_long_time > SIGNAL_COOLDOWN):
-            pending_signals.append({
-                "time": datetime.now(),
-                "price": price,
-                "direction": "long",
-                "checked_3m": False,
-                "checked_5m": False
-            })
-            title = "【BTC做多信号】事件合约看涨（严格）"
-            content = f"""
+        # 做多信号（时间冷却 + 价格防重复）
+        if long_signal:
+            price_diff = abs(price - last_long_price) / price * 100 if last_long_price > 0 else 999
+            if (now_ts - last_long_time > SIGNAL_COOLDOWN) and (price_diff > PRICE_DIFF_LIMIT):
+                pending_signals.append({
+                    "time": datetime.now(),
+                    "price": price,
+                    "direction": "long",
+                    "checked_3m": False,
+                    "checked_5m": False
+                })
+                title = "【BTC做多信号】事件合约看涨（严格）"
+                content = f"""
 **时间**：{now_str}
 **BTC当前价格**：{price:.1f}
 
@@ -236,20 +242,26 @@ while True:
 
 建议：最小仓位开【看涨】3分钟或5分钟事件合约
 """
-            send_wechat(title, content)
-            print(">>> BTC做多信号已推送微信！")
-            last_long_time = now_ts
+                send_wechat(title, content)
+                print(">>> BTC做多信号已推送微信！")
+                last_long_time = now_ts
+                last_long_price = price
+            else:
+                print("（做多信号被防重复过滤）")
 
-        if short_signal and (now_ts - last_short_time > SIGNAL_COOLDOWN):
-            pending_signals.append({
-                "time": datetime.now(),
-                "price": price,
-                "direction": "short",
-                "checked_3m": False,
-                "checked_5m": False
-            })
-            title = "【BTC做空信号】事件合约看跌（严格）"
-            content = f"""
+        # 做空信号（时间冷却 + 价格防重复）
+        if short_signal:
+            price_diff = abs(price - last_short_price) / price * 100 if last_short_price > 0 else 999
+            if (now_ts - last_short_time > SIGNAL_COOLDOWN) and (price_diff > PRICE_DIFF_LIMIT):
+                pending_signals.append({
+                    "time": datetime.now(),
+                    "price": price,
+                    "direction": "short",
+                    "checked_3m": False,
+                    "checked_5m": False
+                })
+                title = "【BTC做空信号】事件合约看跌（严格）"
+                content = f"""
 **时间**：{now_str}
 **BTC当前价格**：{price:.1f}
 
@@ -265,9 +277,12 @@ while True:
 
 建议：最小仓位开【看跌】3分钟或5分钟事件合约
 """
-            send_wechat(title, content)
-            print(">>> BTC做空信号已推送微信！")
-            last_short_time = now_ts
+                send_wechat(title, content)
+                print(">>> BTC做空信号已推送微信！")
+                last_short_time = now_ts
+                last_short_price = price
+            else:
+                print("（做空信号被防重复过滤）")
 
         if not long_signal and not short_signal:
             print("暂无信号")
