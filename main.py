@@ -4,26 +4,25 @@ import pandas as pd
 from datetime import datetime
 from collections import deque
 
-# ==================== 配置区（最严格 + 防重复） ====================
+# ==================== 配置区 ====================
 SERVERCHAN_SENDKEY = "SCT440554TBR9un4ZZPUOu6r28LJvNDpY8"
 
 SYMBOL = "BTC-USDT"
 CHECK_INTERVAL = 20
-MIN_BUY_SELL_RATIO = 5.0
-MIN_SELL_BUY_RATIO = 5.0
+MIN_BUY_SELL_RATIO = 4.2
+MIN_SELL_BUY_RATIO = 4.2
 
-NEAR_LOWER_15M = 0.08
-NEAR_LOWER_5M  = 0.06
-NEAR_LOWER_3M  = 0.05
+NEAR_LOWER_15M = 0.12
+NEAR_LOWER_5M  = 0.10
+NEAR_LOWER_3M  = 0.08
 
-NEAR_UPPER_15M = 0.08
-NEAR_UPPER_5M  = 0.06
-NEAR_UPPER_3M  = 0.05
+NEAR_UPPER_15M = 0.12
+NEAR_UPPER_5M  = 0.10
+NEAR_UPPER_3M  = 0.08
 
-SIGNAL_COOLDOWN = 600          # 10分钟冷却
-PRICE_DIFF_LIMIT = 0.15        # 价格差距小于0.15%视为重复信号
+SIGNAL_COOLDOWN = 180
+PRICE_DIFF_LIMIT = 0.15
 
-# ==================== 成功率统计 ====================
 pending_signals = deque()
 stats_3m = {"win": 0, "total": 0}
 stats_5m = {"win": 0, "total": 0}
@@ -174,7 +173,7 @@ def get_success_rate_text():
     return f"3分钟成功率: {rate_3m:.1f}% ({stats_3m['win']}/{stats_3m['total']})\n5分钟成功率: {rate_5m:.1f}% ({stats_5m['win']}/{stats_5m['total']})"
 
 print("=" * 50)
-print("BTC 事件合约信号监控已启动（最严格+防重复）")
+print("BTC 事件合约信号监控已启动（严格版）")
 print("=" * 50)
 
 while True:
@@ -198,13 +197,11 @@ while True:
         now_str = datetime.now().strftime("%H:%M:%S")
         now_ts = time.time()
 
-        # 做多条件
         near_lower_15 = bb_15["dist_lower"] < NEAR_LOWER_15M and price < bb_15["mid"]
         near_lower_5  = bb_5["dist_lower"] < NEAR_LOWER_5M
         near_lower_3  = bb_3["dist_lower"] < NEAR_LOWER_3M
         long_signal = (buy_sell_ratio >= MIN_BUY_SELL_RATIO) and near_lower_15 and near_lower_5 and near_lower_3
 
-        # 做空条件
         near_upper_15 = bb_15["dist_upper"] < NEAR_UPPER_15M and price > bb_15["mid"]
         near_upper_5  = bb_5["dist_upper"] < NEAR_UPPER_5M
         near_upper_3  = bb_3["dist_upper"] < NEAR_UPPER_3M
@@ -214,7 +211,6 @@ while True:
         print(f"[{now_str}] BTC价格:{price:.1f} | 下轨:{bb_15['dist_lower']:.2f}% | 上轨:{bb_15['dist_upper']:.2f}% | 买/卖:{buy_sell_ratio:.2f}")
         print(f"       {rate_text}")
 
-        # 做多信号（时间冷却 + 价格防重复）
         if long_signal:
             price_diff = abs(price - last_long_price) / price * 100 if last_long_price > 0 else 999
             if (now_ts - last_long_time > SIGNAL_COOLDOWN) and (price_diff > PRICE_DIFF_LIMIT):
@@ -249,7 +245,6 @@ while True:
             else:
                 print("（做多信号被防重复过滤）")
 
-        # 做空信号（时间冷却 + 价格防重复）
         if short_signal:
             price_diff = abs(price - last_short_price) / price * 100 if last_short_price > 0 else 999
             if (now_ts - last_short_time > SIGNAL_COOLDOWN) and (price_diff > PRICE_DIFF_LIMIT):
