@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
-from collections import defaultdict
 
 # ==================== 配置区 ====================
 SYMBOL = "BTC-USDT"
@@ -87,7 +86,7 @@ def get_winrate(period):
     rate = s["win"] / s["total"] * 100
     return f"{rate:.1f}% ({s['win']}/{s['total']})"
 
-# ==================== 信号逻辑（已放宽） ====================
+# ==================== 信号逻辑 ====================
 def check_signal():
     global last_signal_time
     
@@ -152,40 +151,35 @@ def check_signal():
     
     if long_ok:
         last_signal_time = now
-        reason = f"做多 | 价格:{price:.1f} | 买/卖比:{strength:.2f} | 走平:{flat_score}"
-        return "LONG", reason
+        return "LONG", f"做多 | 价格:{price:.1f} | 买/卖比:{strength:.2f}"
     
     if short_ok:
         last_signal_time = now
-        reason = f"做空 | 价格:{price:.1f} | 买/卖比:{strength:.2f} | 走平:{flat_score}"
-        return "SHORT", reason
+        return "SHORT", f"做空 | 价格:{price:.1f} | 买/卖比:{strength:.2f}"
     
     return None, "无信号"
 
-# ==================== 双周期模拟（按截图风格） ====================
-def simulate_both(direction="LONG"):
+# ==================== 实时模拟 3分钟 + 5分钟（含胜率） ====================
+def simulate_realtime(direction="LONG"):
     entry_price = float(get_okx_klines("1m", 5)["close"].iloc[-1])
     entry_time = now_bj()
     direction_cn = "做多" if direction == "LONG" else "做空"
     
-    # 先推送开仓通知
+    # 1. 推送开仓信号
     send_wechat(
         f"【信号触发】BTC {direction_cn}",
         f"信号方向：{direction_cn}\n"
-        f"开仓时间：{entry_time.strftime('%H:%M:%S')}\n"
+        f"开仓时间：{entry_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"开仓价格：{entry_price:.1f}\n"
-        f"将进行 3分钟 + 5分钟 验证"
+        f"开始实时验证 3分钟 & 5分钟事件"
     )
     
-    # ---------- 等待 3 分钟 ----------
+    # 2. 等待3分钟后验证
     time.sleep(3 * 60 + 5)
     price_3m = float(get_okx_klines("1m", 5)["close"].iloc[-1])
     time_3m = now_bj()
     
-    if direction == "LONG":
-        win_3m = price_3m > entry_price
-    else:
-        win_3m = price_3m < entry_price
+    win_3m = (price_3m > entry_price) if direction == "LONG" else (price_3m < entry_price)
     
     stats["3m"]["total"] += 1
     if win_3m:
@@ -193,7 +187,6 @@ def simulate_both(direction="LONG"):
     
     result_3m = "成功 ✅" if win_3m else "失败 ❌"
     
-    # 推送 3 分钟结果（完全按截图风格）
     send_wechat(
         f"【3分钟验证】BTC {direction_cn}信号",
         f"验证时间：{time_3m.strftime('%H:%M:%S')}\n"
@@ -204,15 +197,12 @@ def simulate_both(direction="LONG"):
         f"当前3分钟成功率：{get_winrate('3m')}"
     )
     
-    # ---------- 再等 2 分钟到 5 分钟 ----------
+    # 3. 再等2分钟到5分钟后验证
     time.sleep(2 * 60 + 3)
     price_5m = float(get_okx_klines("1m", 5)["close"].iloc[-1])
     time_5m = now_bj()
     
-    if direction == "LONG":
-        win_5m = price_5m > entry_price
-    else:
-        win_5m = price_5m < entry_price
+    win_5m = (price_5m > entry_price) if direction == "LONG" else (price_5m < entry_price)
     
     stats["5m"]["total"] += 1
     if win_5m:
@@ -220,7 +210,6 @@ def simulate_both(direction="LONG"):
     
     result_5m = "成功 ✅" if win_5m else "失败 ❌"
     
-    # 推送 5 分钟结果
     send_wechat(
         f"【5分钟验证】BTC {direction_cn}信号",
         f"验证时间：{time_5m.strftime('%H:%M:%S')}\n"
@@ -232,17 +221,18 @@ def simulate_both(direction="LONG"):
     )
     
     print(f"[{entry_time.strftime('%H:%M:%S')}] {direction_cn} | "
-          f"3m:{result_3m} 5m:{result_5m} | "
-          f"3m胜率:{get_winrate('3m')} 5m胜率:{get_winrate('5m')}")
+          f"3m:{result_3m} | 5m:{result_5m} | "
+          f"3m胜率:{get_winrate('3m')} | 5m胜率:{get_winrate('5m')}")
 
 # ==================== 主循环 ====================
 def main():
-    print("多空信号系统启动（截图风格 + GMT+8）...")
+    print("信号系统启动（实时验证 + 胜率统计）...")
     send_wechat(
         "系统上线",
-        f"事件合约信号系统已启动\n"
-        f"时间时区：GMT+8（北京时间）\n"
-        f"信号后将按截图风格推送 3分钟 & 5分钟验证结果"
+        "事件合约信号系统已启动\n"
+        "时区：GMT+8（北京时间）\n"
+        "信号后实时模拟开单并验证3分钟 & 5分钟结果\n"
+        "同时统计累计胜率"
     )
     
     while True:
@@ -250,7 +240,7 @@ def main():
             direction, reason = check_signal()
             if direction:
                 print(f"[{now_bj().strftime('%H:%M:%S')}] 触发信号 → {reason}")
-                simulate_both(direction=direction)
+                simulate_realtime(direction=direction)
             else:
                 print(f"[{now_bj().strftime('%H:%M:%S')}] {reason}")
             
