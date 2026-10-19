@@ -2,7 +2,7 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 # ==================== 配置区 ====================
@@ -10,7 +10,10 @@ SYMBOL = "BTC-USDT"
 BB_PERIOD = 20
 BB_STD = 2
 SERVERCHAN_SENDKEY = "SCT440554TBR9un4ZZPUOu6r28LJvNDpY8"
-SIGNAL_COOLDOWN = 120          # 冷却时间缩短到2分钟
+SIGNAL_COOLDOWN = 120
+
+# 北京时间
+TZ_BJ = timezone(timedelta(hours=8))
 
 # ==================== 全局状态 ====================
 last_signal_time = 0
@@ -19,7 +22,10 @@ stats = {
     "5m": {"win": 0, "total": 0}
 }
 
-# ==================== 工具函数（仅OKX） ====================
+# ==================== 工具函数 ====================
+def now_bj():
+    return datetime.now(TZ_BJ)
+
 def get_okx_klines(interval, limit=50):
     url = "https://www.okx.com/api/v5/market/candles"
     params = {"instId": SYMBOL, "bar": interval, "limit": str(limit)}
@@ -62,7 +68,7 @@ def get_okx_orderbook_strength():
         return 999
     return bid_vol / ask_vol
 
-def is_bb_flat(ma, upper, lower, threshold=0.0020):  # 稍微放宽带宽判断
+def is_bb_flat(ma, upper, lower, threshold=0.0020):
     width = (upper - lower) / ma
     return width < threshold
 
@@ -77,8 +83,9 @@ def send_wechat(title, content):
 def get_winrate(period):
     s = stats[period]
     if s["total"] == 0:
-        return "0.0%"
-    return f"{s['win']/s['total']*100:.1f}% ({s['win']}/{s['total']})"
+        return "0.0% (0/0)"
+    rate = s["win"] / s["total"] * 100
+    return f"{rate:.1f}% ({s['win']}/{s['total']})"
 
 # ==================== 信号逻辑（已放宽） ====================
 def check_signal():
@@ -113,30 +120,24 @@ def check_signal():
     except Exception as e:
         return None, f"盘口获取失败: {e}"
     
-    # 量能（稍微放宽）
     vol_1m = df_1m["volume"].iloc[-3:].mean()
     vol_prev = df_1m["volume"].iloc[-6:-3].mean()
     vol_up = vol_1m > vol_prev * 1.05
     
-    # ========== 做多条件（已放宽） ==========
+    # 做多
     near_15_lower = price <= low15 * 1.0025
     near_15_mid   = abs(price - ma15) / ma15 < 0.0018
     not_near_upper = price < up15 * 0.9980
     
-    near_3_mid = abs(price - ma3) / ma3 < 0.0012
-    near_5_mid = abs(price - ma5) / ma5 < 0.0012
-    # 放宽不追条件
-    not_chase_long = True   # 暂时关闭严格不追，提高触发率
-    
     long_ok = (
         (near_15_lower or near_15_mid) and
         not_near_upper and
-        flat_score >= 1 and                 # 从2降到1
-        strength > 1.15 and                 # 从1.25降到1.15
+        flat_score >= 1 and
+        strength > 1.15 and
         vol_up
     )
     
-    # ========== 做空条件（已放宽） ==========
+    # 做空
     near_15_upper = price >= up15 * 0.9975
     near_15_mid_s = abs(price - ma15) / ma15 < 0.0018
     not_near_lower = price > low15 * 1.0020
@@ -145,52 +146,41 @@ def check_signal():
         (near_15_upper or near_15_mid_s) and
         not_near_lower and
         flat_score >= 1 and
-        strength < 0.87 and                 # 从0.80放宽到0.87
+        strength < 0.87 and
         vol_up
     )
     
     if long_ok:
         last_signal_time = now
-        reason = (
-            f"【做多信号】\n"
-            f"价格: {price:.1f}\n"
-            f"15分中轨: {ma15:.1f} 下轨: {low15:.1f}\n"
-            f"欧易买/卖比: {strength:.2f}\n"
-            f"布林带走平数: {flat_score}"
-        )
+        reason = f"做多 | 价格:{price:.1f} | 买/卖比:{strength:.2f} | 走平:{flat_score}"
         return "LONG", reason
     
     if short_ok:
         last_signal_time = now
-        reason = (
-            f"【做空信号】\n"
-            f"价格: {price:.1f}\n"
-            f"15分中轨: {ma15:.1f} 上轨: {up15:.1f}\n"
-            f"欧易买/卖比: {strength:.2f}\n"
-            f"布林带走平数: {flat_score}"
-        )
+        reason = f"做空 | 价格:{price:.1f} | 买/卖比:{strength:.2f} | 走平:{flat_score}"
         return "SHORT", reason
     
     return None, "无信号"
 
-# ==================== 双周期模拟 ====================
+# ==================== 双周期模拟（按截图风格） ====================
 def simulate_both(direction="LONG"):
     entry_price = float(get_okx_klines("1m", 5)["close"].iloc[-1])
-    start_time = datetime.now(timezone.utc)
+    entry_time = now_bj()
     direction_cn = "做多" if direction == "LONG" else "做空"
     
+    # 先推送开仓通知
     send_wechat(
-        f"【{direction_cn}信号】开始模拟",
-        f"方向: {direction_cn}\n"
-        f"入场价: {entry_price:.1f}\n"
-        f"将同时模拟 3分钟 + 5分钟 事件\n"
-        f"当前3分钟胜率: {get_winrate('3m')}\n"
-        f"当前5分钟胜率: {get_winrate('5m')}"
+        f"【信号触发】BTC {direction_cn}",
+        f"信号方向：{direction_cn}\n"
+        f"开仓时间：{entry_time.strftime('%H:%M:%S')}\n"
+        f"开仓价格：{entry_price:.1f}\n"
+        f"将进行 3分钟 + 5分钟 验证"
     )
     
-    # ----- 等待3分钟 -----
+    # ---------- 等待 3 分钟 ----------
     time.sleep(3 * 60 + 5)
     price_3m = float(get_okx_klines("1m", 5)["close"].iloc[-1])
+    time_3m = now_bj()
     
     if direction == "LONG":
         win_3m = price_3m > entry_price
@@ -201,11 +191,23 @@ def simulate_both(direction="LONG"):
     if win_3m:
         stats["3m"]["win"] += 1
     
-    result_3m = "赢" if win_3m else "输"
+    result_3m = "成功 ✅" if win_3m else "失败 ❌"
     
-    # ----- 再等2分钟到5分钟 -----
+    # 推送 3 分钟结果（完全按截图风格）
+    send_wechat(
+        f"【3分钟验证】BTC {direction_cn}信号",
+        f"验证时间：{time_3m.strftime('%H:%M:%S')}\n"
+        f"信号方向：{direction_cn}\n"
+        f"开仓价格：{entry_price:.1f}\n"
+        f"当前价格：{price_3m:.1f}\n"
+        f"结果：{result_3m}\n"
+        f"当前3分钟成功率：{get_winrate('3m')}"
+    )
+    
+    # ---------- 再等 2 分钟到 5 分钟 ----------
     time.sleep(2 * 60 + 3)
     price_5m = float(get_okx_klines("1m", 5)["close"].iloc[-1])
+    time_5m = now_bj()
     
     if direction == "LONG":
         win_5m = price_5m > entry_price
@@ -216,41 +218,41 @@ def simulate_both(direction="LONG"):
     if win_5m:
         stats["5m"]["win"] += 1
     
-    result_5m = "赢" if win_5m else "输"
+    result_5m = "成功 ✅" if win_5m else "失败 ❌"
     
-    # 推送最终结果
+    # 推送 5 分钟结果
     send_wechat(
-        f"模拟结果（{direction_cn}）",
-        f"入场价: {entry_price:.1f}\n\n"
-        f"【3分钟】\n"
-        f"出场价: {price_3m:.1f} → {result_3m}\n"
-        f"3分钟胜率: {get_winrate('3m')}\n\n"
-        f"【5分钟】\n"
-        f"出场价: {price_5m:.1f} → {result_5m}\n"
-        f"5分钟胜率: {get_winrate('5m')}"
+        f"【5分钟验证】BTC {direction_cn}信号",
+        f"验证时间：{time_5m.strftime('%H:%M:%S')}\n"
+        f"信号方向：{direction_cn}\n"
+        f"开仓价格：{entry_price:.1f}\n"
+        f"当前价格：{price_5m:.1f}\n"
+        f"结果：{result_5m}\n"
+        f"当前5分钟成功率：{get_winrate('5m')}"
     )
     
-    print(f"[{start_time}] {direction_cn} | 3m:{result_3m} 5m:{result_5m} | "
+    print(f"[{entry_time.strftime('%H:%M:%S')}] {direction_cn} | "
+          f"3m:{result_3m} 5m:{result_5m} | "
           f"3m胜率:{get_winrate('3m')} 5m胜率:{get_winrate('5m')}")
 
 # ==================== 主循环 ====================
 def main():
-    print("多空信号系统启动（信号已放宽 + 双周期模拟）...")
+    print("多空信号系统启动（截图风格 + GMT+8）...")
     send_wechat(
         "系统上线",
-        "事件合约多空信号系统已启动\n"
-        "信号条件已放宽\n"
-        "信号后同时模拟3分钟 + 5分钟事件并统计胜率"
+        f"事件合约信号系统已启动\n"
+        f"时间时区：GMT+8（北京时间）\n"
+        f"信号后将按截图风格推送 3分钟 & 5分钟验证结果"
     )
     
     while True:
         try:
             direction, reason = check_signal()
             if direction:
-                print(f"[{datetime.now()}] 触发信号\n{reason}")
+                print(f"[{now_bj().strftime('%H:%M:%S')}] 触发信号 → {reason}")
                 simulate_both(direction=direction)
             else:
-                print(f"[{datetime.now()}] {reason}")
+                print(f"[{now_bj().strftime('%H:%M:%S')}] {reason}")
             
             time.sleep(12)
             
